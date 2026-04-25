@@ -90,12 +90,133 @@ async function niaFetch<T>(
   }
 }
 
-export async function indexRepository(repository: string, ctx: LogCtx = {}): Promise<NiaSource> {
+export type IndexRepositoryOptions = {
+  branch?: string;
+  ref?: string;
+  displayName?: string;
+  projectId?: string;
+};
+
+export async function indexRepository(
+  repository: string,
+  options: IndexRepositoryOptions = {},
+  ctx: LogCtx = {},
+): Promise<NiaSource> {
   return niaFetch<NiaSource>(
     "/sources",
     {
-    method: "POST",
-    body: JSON.stringify({ type: "repository", repository }),
+      method: "POST",
+      body: JSON.stringify({
+        type: "repository",
+        repository,
+        branch: options.branch,
+        ref: options.ref,
+        display_name: options.displayName,
+        project_id: options.projectId,
+      }),
+    },
+    ctx,
+  );
+}
+
+export type IndexDocumentationOptions = {
+  urlPatterns?: string[];
+  excludePatterns?: string[];
+  maxDepth?: number;
+  crawlEntireDomain?: boolean;
+  checkLlmsTxt?: boolean;
+  displayName?: string;
+};
+
+export async function indexDocumentation(
+  url: string,
+  options: IndexDocumentationOptions = {},
+  ctx: LogCtx = {},
+): Promise<NiaSource> {
+  return niaFetch<NiaSource>(
+    "/sources",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        type: "documentation",
+        url,
+        url_patterns: options.urlPatterns,
+        exclude_patterns: options.excludePatterns,
+        max_depth: options.maxDepth,
+        crawl_entire_domain: options.crawlEntireDomain,
+        check_llms_txt: options.checkLlmsTxt,
+        display_name: options.displayName,
+      }),
+    },
+    ctx,
+  );
+}
+
+export async function indexResearchPaper(
+  url: string,
+  options: { displayName?: string } = {},
+  ctx: LogCtx = {},
+): Promise<NiaSource> {
+  return niaFetch<NiaSource>(
+    "/sources",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        type: "research_paper",
+        url,
+        display_name: options.displayName,
+      }),
+    },
+    ctx,
+  );
+}
+
+export async function indexHuggingfaceDataset(
+  repository: string,
+  options: { displayName?: string } = {},
+  ctx: LogCtx = {},
+): Promise<NiaSource> {
+  return niaFetch<NiaSource>(
+    "/sources",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        type: "huggingface_dataset",
+        repository,
+        display_name: options.displayName,
+      }),
+    },
+    ctx,
+  );
+}
+
+export type LocalFolderFile = {
+  path: string;
+  content: string;
+};
+
+export type IndexLocalFolderOptions = {
+  folderName?: string;
+  folderPath?: string;
+  files?: LocalFolderFile[];
+  displayName?: string;
+};
+
+export async function indexLocalFolder(
+  options: IndexLocalFolderOptions,
+  ctx: LogCtx = {},
+): Promise<NiaSource> {
+  return niaFetch<NiaSource>(
+    "/sources",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        type: "local_folder",
+        folder_name: options.folderName,
+        folder_path: options.folderPath,
+        files: options.files,
+        display_name: options.displayName,
+      }),
     },
     ctx,
   );
@@ -105,46 +226,109 @@ export async function getSource(sourceId: string, ctx: LogCtx = {}): Promise<Nia
   return niaFetch<NiaSource>(`/sources/${sourceId}`, {}, ctx);
 }
 
+export type ListSourcesFilters = {
+  type?: NiaSource["type"];
+  query?: string;
+  status?: NiaSourceStatus;
+  categoryId?: string;
+  limit?: number;
+  offset?: number;
+};
+
+export type ListSourcesResponse = {
+  items: NiaSource[];
+  pagination: {
+    total: number;
+    limit: number;
+    offset: number;
+    has_more: boolean;
+  };
+};
+
+export async function listSources(
+  filters: ListSourcesFilters = {},
+  ctx: LogCtx = {},
+): Promise<ListSourcesResponse> {
+  const params = new URLSearchParams();
+  if (filters.type) params.set("type", filters.type);
+  if (filters.query) params.set("query", filters.query);
+  if (filters.status) params.set("status", filters.status);
+  if (filters.categoryId) params.set("category_id", filters.categoryId);
+  if (filters.limit !== undefined) params.set("limit", String(filters.limit));
+  if (filters.offset !== undefined) params.set("offset", String(filters.offset));
+  const qs = params.toString();
+  return niaFetch<ListSourcesResponse>(`/sources${qs ? `?${qs}` : ""}`, {}, ctx);
+}
+
 export type NiaSearchResult = {
   // Nia's search response shape isn't strongly documented; pass through and
   // let the agent reason about whatever fields come back.
   [key: string]: unknown;
 };
 
-export async function searchRepository(args: {
+export type SearchSourcesArgs = {
   query: string;
-  repositories: string[];
+  repositories?: string[];
+  dataSources?: string[];
   ctx?: LogCtx;
-}): Promise<NiaSearchResult> {
+};
+
+export async function searchSources(args: SearchSourcesArgs): Promise<NiaSearchResult> {
   const ctx = args.ctx ?? {};
+  const repositories = args.repositories ?? [];
+  const dataSources = args.dataSources ?? [];
+  if (!repositories.length && !dataSources.length) {
+    throw new Error("searchSources requires at least one repository or data source");
+  }
   log(
     "info",
     "nia.search.start",
-    { repositories: args.repositories, queryPreview: args.query.slice(0, 300), queryLen: args.query.length },
+    {
+      repositories,
+      dataSources,
+      queryPreview: args.query.slice(0, 300),
+      queryLen: args.query.length,
+    },
     { ...ctx, component: "nia" },
   );
   try {
+    const body: Record<string, unknown> = {
+      mode: "query",
+      messages: [{ role: "user", content: args.query }],
+    };
+    if (repositories.length) body.repositories = repositories;
+    if (dataSources.length) body.data_sources = dataSources;
     const res = await niaFetch<NiaSearchResult>(
       "/search",
-      {
-        method: "POST",
-        body: JSON.stringify({
-          mode: "query",
-          messages: [{ role: "user", content: args.query }],
-          repositories: args.repositories,
-        }),
-      },
+      { method: "POST", body: JSON.stringify(body) },
       ctx,
     );
-    log("info", "nia.search.ok", { repositories: args.repositories }, { ...ctx, component: "nia" });
+    log(
+      "info",
+      "nia.search.ok",
+      { repositories, dataSources },
+      { ...ctx, component: "nia" },
+    );
     return res;
   } catch (err) {
     log(
       "error",
       "nia.search.error",
-      { repositories: args.repositories, error: serializeError(err) },
+      { repositories, dataSources, error: serializeError(err) },
       { ...ctx, component: "nia" },
     );
     throw err;
   }
+}
+
+export async function searchRepository(args: {
+  query: string;
+  repositories: string[];
+  ctx?: LogCtx;
+}): Promise<NiaSearchResult> {
+  return searchSources({
+    query: args.query,
+    repositories: args.repositories,
+    ctx: args.ctx,
+  });
 }
