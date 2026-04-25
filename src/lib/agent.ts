@@ -158,7 +158,6 @@ You do NOT have access to tools in this mode. You are given retrieved repo conte
       openaiClient().chat.completions.create(
         {
           model: "gpt-5.5-medium",
-          temperature: 0.2,
           messages: [
             { role: "system", content: system },
             { role: "user", content: user },

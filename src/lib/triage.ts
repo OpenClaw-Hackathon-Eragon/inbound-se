@@ -163,7 +163,6 @@ async function triageWithOpenAI(args: {
       openaiClient().chat.completions.create(
         {
           model: "gpt-5.5-medium",
-          temperature: 0.2,
           messages: [{ role: "user", content: prompt }],
         },
         { signal },
