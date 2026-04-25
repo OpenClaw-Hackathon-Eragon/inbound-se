@@ -4,6 +4,7 @@ import { z } from "zod";
 
 import { searchRepository } from "./nia";
 import { withTimeout } from "./llmTimeout";
+import { log, serializeError, summarizeText, withSpan, type LogCtx } from "./log";
 import { openaiClient } from "./openaiClient";
 
 const SUPABASE_JS_REPO = "supabase/supabase-js";
@@ -60,6 +61,7 @@ const niaSearchTool = betaZodTool({
     const result = await searchRepository({
       query,
       repositories: [SUPABASE_JS_REPO],
+      ctx: { component: "agent" },
     });
     return JSON.stringify(result);
   },
@@ -79,7 +81,10 @@ Please try again in a few minutes. If it’s urgent, feel free to reply with:
 
 — Inbound (supabase-js support)`;
 
-async function prepareResponseWithClaude(query: string): Promise<PrepareResponseResult> {
+async function prepareResponseWithClaude(
+  query: string,
+  ctx: LogCtx,
+): Promise<PrepareResponseResult> {
   const finalMessage = await withTimeout({
     label: "Claude answer",
     timeoutMs: 45_000,
@@ -103,10 +108,26 @@ async function prepareResponseWithClaude(query: string): Promise<PrepareResponse
     .join("\n\n")
     .trim();
 
+  log(
+    "info",
+    "agent.claude.response",
+    {
+      model: "claude-opus-4-7",
+      stopReason: finalMessage.stop_reason ?? null,
+      contentBlocks: finalMessage.content?.map((b) => b.type) ?? [],
+      text: summarizeText(text),
+      usage: (finalMessage as unknown as { usage?: unknown }).usage ?? undefined,
+    },
+    { ...ctx, component: "agent" },
+  );
+
   return { text, stopReason: finalMessage.stop_reason };
 }
 
-async function prepareResponseWithOpenAI(query: string): Promise<PrepareResponseResult> {
+async function prepareResponseWithOpenAI(
+  query: string,
+  ctx: LogCtx,
+): Promise<PrepareResponseResult> {
   const retrieval = await withTimeout({
     label: "Nia search (OpenAI fallback)",
     timeoutMs: 20_000,
@@ -114,6 +135,7 @@ async function prepareResponseWithOpenAI(query: string): Promise<PrepareResponse
       searchRepository({
         query,
         repositories: [SUPABASE_JS_REPO],
+        ctx,
       }),
   });
 
@@ -147,28 +169,69 @@ You do NOT have access to tools in this mode. You are given retrieved repo conte
   });
 
   const text = res.choices?.[0]?.message?.content?.trim() ?? "";
+  log(
+    "info",
+    "agent.openai.response",
+    {
+      model: res.model ?? "gpt-5.5-medium",
+      responseId: (res as unknown as { id?: unknown }).id ?? undefined,
+      finishReason: res.choices?.[0]?.finish_reason ?? null,
+      text: summarizeText(text),
+      usage: (res as unknown as { usage?: unknown }).usage ?? undefined,
+    },
+    { ...ctx, component: "agent" },
+  );
   if (!text) {
     throw new Error("OpenAI returned empty response");
   }
   return { text, stopReason: "openai_fallback" };
 }
 
-export async function prepareResponse(query: string): Promise<PrepareResponseResult> {
+export async function prepareResponse(
+  query: string,
+  ctx: LogCtx = {},
+): Promise<PrepareResponseResult> {
+  const effectiveCtx = { ...ctx, component: "agent" };
+  log(
+    "info",
+    "agent.prepare.start",
+    { queryLen: query.length, queryPreview: query.slice(0, 300) },
+    effectiveCtx,
+  );
   try {
-    const res = await prepareResponseWithClaude(query);
+    const res = await withSpan(
+      "agent.claude",
+      () => prepareResponseWithClaude(query, effectiveCtx),
+      effectiveCtx,
+    );
     if (res.text.trim()) return res;
     throw new Error("Claude returned empty response");
-  } catch {
-    // fall through
+  } catch (err) {
+    log(
+      "error",
+      "agent.claude.error",
+      { error: serializeError(err) },
+      effectiveCtx,
+    );
   }
 
   try {
-    const res = await prepareResponseWithOpenAI(query);
+    const res = await withSpan(
+      "agent.openai",
+      () => prepareResponseWithOpenAI(query, effectiveCtx),
+      effectiveCtx,
+    );
     if (res.text.trim()) return res;
     throw new Error("OpenAI returned empty response");
-  } catch {
-    // fall through
+  } catch (err) {
+    log(
+      "error",
+      "agent.openai.error",
+      { error: serializeError(err) },
+      effectiveCtx,
+    );
   }
 
+  log("warn", "agent.busy_fallback", {}, effectiveCtx);
   return { text: BUSY_FALLBACK_TEXT, stopReason: "busy_fallback" };
 }
