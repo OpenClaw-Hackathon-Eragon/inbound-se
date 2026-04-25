@@ -111,7 +111,6 @@ async function triageWithClaude(args: {
         {
           model: "claude-opus-4-7",
           max_tokens: 1200,
-          temperature: 0.2,
           system: SYSTEM_PROMPT,
           messages: [
             {
@@ -128,6 +127,7 @@ async function triageWithClaude(args: {
   });
 
   const raw = extractTextBlock(message);
+  const parsedClaude = parseTriageJson(raw);
   log(
     "info",
     "triage.claude.response",
@@ -141,7 +141,7 @@ async function triageWithClaude(args: {
     },
     { ...ctx, component: "triage" },
   );
-  return parseTriageJson(raw);
+  return parsedClaude;
 }
 
 async function triageWithOpenAI(args: {
@@ -183,7 +183,8 @@ async function triageWithOpenAI(args: {
     },
     { ...ctx, component: "triage" },
   );
-  return text ? parseTriageJson(text) : null;
+  const parsed = text ? parseTriageJson(text) : null;
+  return parsed;
 }
 
 export async function runTriage(args: {
@@ -205,7 +206,9 @@ export async function runTriage(args: {
       forceReady,
       ctx,
     });
-    if (parsedClaude) return parsedClaude;
+    if (parsedClaude) {
+      return parsedClaude;
+    }
     log(
       "warn",
       "triage.claude.unparseable",
@@ -227,7 +230,9 @@ export async function runTriage(args: {
       forceReady,
       ctx,
     });
-    if (parsedOpenAI) return parsedOpenAI;
+    if (parsedOpenAI) {
+      return parsedOpenAI;
+    }
     log(
       "warn",
       "triage.openai.unparseable_or_empty",
