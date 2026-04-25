@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 
 import { withTimeout } from "./llmTimeout";
+import { log, serializeError, summarizeText, type LogCtx } from "./log";
 import { openaiClient } from "./openaiClient";
 
 export const TriageResultSchema = z.union([
@@ -42,7 +43,7 @@ A useful answer requires at minimum:
 - The framework/environment (Next.js App Router, React SPA, Node script, React Native, etc.)
 - The developer's concrete goal + what is failing (error message or observed behavior)
 
-If anything critical is missing, ask 1–3 targeted questions that a senior engineer would ask.
+If anything critical is missing, ask 1-3 targeted questions that a senior engineer would ask.
 
 Output MUST be valid JSON matching one of:
 { "status": "NEED_INFO", "questions": ["...", "..."] }
@@ -98,7 +99,10 @@ function busyTriageFallback(forceReady: boolean, thread: string): TriageResult {
 async function triageWithClaude(args: {
   thread: string;
   forceReady: boolean;
+  ctx?: LogCtx;
 }): Promise<TriageResult | null> {
+  const ctx = args.ctx ?? {};
+  const start = Date.now();
   const message = await withTimeout({
     label: "Claude triage",
     timeoutMs: 20_000,
@@ -124,18 +128,34 @@ async function triageWithClaude(args: {
   });
 
   const raw = extractTextBlock(message);
+  log(
+    "info",
+    "triage.claude.response",
+    {
+      model: "claude-opus-4-7",
+      durationMs: Date.now() - start,
+      stopReason: (message as unknown as { stop_reason?: unknown }).stop_reason ?? null,
+      text: summarizeText(raw),
+      contentBlocks: message.content?.map((b) => b.type) ?? [],
+      usage: (message as unknown as { usage?: unknown }).usage ?? undefined,
+    },
+    { ...ctx, component: "triage" },
+  );
   return parseTriageJson(raw);
 }
 
 async function triageWithOpenAI(args: {
   thread: string;
   forceReady: boolean;
+  ctx?: LogCtx;
 }): Promise<TriageResult | null> {
+  const ctx = args.ctx ?? {};
   const prompt = `${SYSTEM_PROMPT}\n\n${userPrompt({
     thread: args.thread,
     forceReady: args.forceReady,
   })}`;
 
+  const start = Date.now();
   const res = await withTimeout({
     label: "OpenAI triage",
     timeoutMs: 20_000,
@@ -151,34 +171,85 @@ async function triageWithOpenAI(args: {
   });
 
   const text = res.choices?.[0]?.message?.content?.trim() ?? "";
+  log(
+    "info",
+    "triage.openai.response",
+    {
+      model: res.model ?? "gpt-5.5-medium",
+      responseId: (res as unknown as { id?: unknown }).id ?? undefined,
+      durationMs: Date.now() - start,
+      finishReason: res.choices?.[0]?.finish_reason ?? null,
+      text: summarizeText(text),
+      usage: (res as unknown as { usage?: unknown }).usage ?? undefined,
+    },
+    { ...ctx, component: "triage" },
+  );
   return text ? parseTriageJson(text) : null;
 }
 
 export async function runTriage(args: {
   thread: string;
   round: 0 | 1;
+  ctx?: LogCtx;
 }): Promise<TriageResult> {
   const forceReady = args.round >= 1;
+  const ctx = args.ctx ?? {};
+  log(
+    "info",
+    "triage.start",
+    { round: args.round, forceReady, threadLen: args.thread.length },
+    { ...ctx, component: "triage" },
+  );
   try {
     const parsedClaude = await triageWithClaude({
       thread: args.thread,
       forceReady,
+      ctx,
     });
     if (parsedClaude) return parsedClaude;
-  } catch {
-    // fall through to OpenAI
+    log(
+      "warn",
+      "triage.claude.unparseable",
+      { note: "Claude returned text but JSON schema parse failed" },
+      { ...ctx, component: "triage" },
+    );
+  } catch (err) {
+    log(
+      "error",
+      "triage.claude.error",
+      { error: serializeError(err) },
+      { ...ctx, component: "triage" },
+    );
   }
 
   try {
     const parsedOpenAI = await triageWithOpenAI({
       thread: args.thread,
       forceReady,
+      ctx,
     });
     if (parsedOpenAI) return parsedOpenAI;
-  } catch {
-    // fall through to busy fallback
+    log(
+      "warn",
+      "triage.openai.unparseable_or_empty",
+      { note: "OpenAI returned empty or JSON parse failed" },
+      { ...ctx, component: "triage" },
+    );
+  } catch (err) {
+    log(
+      "error",
+      "triage.openai.error",
+      { error: serializeError(err) },
+      { ...ctx, component: "triage" },
+    );
   }
 
+  log(
+    "warn",
+    "triage.fallback",
+    { forceReady, result: forceReady ? "READY" : "NEED_INFO" },
+    { ...ctx, component: "triage" },
+  );
   return busyTriageFallback(forceReady, args.thread);
 }
 
