@@ -6,10 +6,10 @@ import { searchSources } from "./nia";
 import { withTimeout } from "./llmTimeout";
 import { log, serializeError, summarizeText, withSpan, type LogCtx } from "./log";
 import { openaiClient } from "./openaiClient";
+import { TEN_MINUTES_MS } from "./timeouts";
 
 const MODEL_SUBAGENT_EASY = "claude-sonnet-4-6";
 const MODEL_SUBAGENT_HARD = "claude-opus-4-7";
-const MODEL_MASTER = "claude-haiku-4-5-20251001";
 const MODEL_CLASSIFIER = "claude-haiku-4-5-20251001";
 
 type Difficulty = "easy" | "complex";
@@ -31,41 +31,31 @@ COMPLEX — needs the strongest model:
 
 When unsure, choose complex.`;
 
-const KB_SUBAGENT_PROMPT = `You are a research subagent. Your only job is to surface relevant facts
-from the indexed knowledge base in Nia.
+const COMBINED_PROMPT = `You are a support agent that first researches a question using the knowledge base, then writes a clean email response.
 
-You have one tool, nia_search_kb. Use it.
+## Phase 1 — Research
 
-How to work:
+Use the nia_search_kb tool to find relevant facts before writing anything.
+
 - Run 1-3 focused queries. Issue follow-ups if the first results are thin.
 - Pull out concrete API names, type signatures, options, file paths, and short snippets.
-- Cite source paths/URLs exactly as Nia returns them, formatted as
-  [kb/<path-or-url>]. Only cite paths you actually retrieved.
-- Do NOT invent anything. If something isn't in the results, say so.
+- Only use information you actually retrieved. Do NOT invent anything.
 
-Output format (plain text, no preamble, no email niceties):
-- "Findings:" then 4-10 bullets of factual takeaways, each with a citation.
-- "Code:" then one short copy-pasteable snippet if relevant.
-- "Gaps:" 0-2 bullets describing what the KB did NOT cover for this question.
+## Phase 2 — Email Response
 
-You are not writing the final reply. A separate agent will turn your findings into
-a single email response.`;
-
-const MASTER_PROMPT = `You are a support agent.
-An upstream research subagent has already searched authoritative KB sources for you.
-You will be given its findings.
+Using only what you found above, write the final email reply.
 
 Hard requirements (non-negotiable):
-- Do NOT invent methods, options, imports, or paths beyond what the subagents reported.
-  If neither source covers something, say so plainly.
-- Cite paths/URLs exactly as the subagent listed them. 1-4 citations total.
-- Reply as an email:
+- Do NOT invent methods, options, imports, or paths beyond what the KB returned.
+  If the KB did not cover something, say so plainly.
+- Cite source paths/URLs exactly as Nia returned them, formatted as [kb/<path-or-url>].
+  1-4 citations total, only citing paths you actually retrieved.
+- Structure the reply as:
   - Direct answer: 2-4 sentences.
-  - Code example: one copy-pasteable block.
+  - Code example: one copy-pasteable block (if relevant).
   - Short "Notes / gotchas" section if needed (bullets).
 
-The reply will be sent back to the user as an email response. Write a clean,
-self-contained answer — no meta-commentary about your tools or the subagent process.`;
+Write a clean, self-contained answer — no meta-commentary about your tools or research process.`;
 
 function client(): Anthropic {
   if (!process.env.ANTHROPIC_API_KEY) {
@@ -110,7 +100,7 @@ async function classifyDifficulty(query: string, ctx: LogCtx): Promise<Difficult
   try {
     const res = await withTimeout({
       label: "Difficulty classifier",
-      timeoutMs: 5_000,
+      timeoutMs: TEN_MINUTES_MS,
       run: (signal) =>
         client().messages.create(
           {
@@ -157,7 +147,7 @@ async function runSubagent(args: {
 }): Promise<string> {
   const message = await withTimeout({
     label: args.label,
-    timeoutMs: 35_000,
+    timeoutMs: TEN_MINUTES_MS,
     run: async (signal) => {
       const runner = client().beta.messages.toolRunner({
         model: args.model,
@@ -189,49 +179,6 @@ async function runSubagent(args: {
   return text;
 }
 
-async function synthesize(args: {
-  query: string;
-  kbFindings: string | null;
-  ctx: LogCtx;
-}): Promise<string> {
-  const userMessage = [
-    `USER_QUESTION:`,
-    args.query,
-    ``,
-    `KB_SUBAGENT_FINDINGS:`,
-    args.kbFindings ?? "(unavailable — kb subagent failed or returned nothing)",
-  ].join("\n");
-
-  const res = await withTimeout({
-    label: "Master synthesize",
-    timeoutMs: 20_000,
-    run: (signal) =>
-      client().beta.messages.create(
-        {
-          model: MODEL_MASTER,
-          max_tokens: 2000,
-          system: MASTER_PROMPT,
-          messages: [{ role: "user", content: userMessage }],
-        },
-        { signal },
-      ),
-  });
-
-  const text = extractText(res);
-  log(
-    "info",
-    "agent.master.response",
-    {
-      model: MODEL_MASTER,
-      stopReason: res.stop_reason ?? null,
-      text: summarizeText(text),
-      usage: (res as unknown as { usage?: unknown }).usage ?? undefined,
-    },
-    { ...args.ctx, component: "agent" },
-  );
-  return text;
-}
-
 export type PrepareResponseResult = {
   text: string;
   stopReason: string | null;
@@ -255,66 +202,36 @@ async function prepareResponseWithClaude(
     () => classifyDifficulty(query, ctx),
     ctx,
   );
-  const subagentModel =
-    difficulty === "easy" ? MODEL_SUBAGENT_EASY : MODEL_SUBAGENT_HARD;
+  const model = difficulty === "easy" ? MODEL_SUBAGENT_EASY : MODEL_SUBAGENT_HARD;
 
-  const kbResult = await withSpan(
-    "agent.subagent.kb",
+  const text = await withSpan(
+    "agent.combined",
     () =>
       runSubagent({
-        label: "KB subagent",
-        systemPrompt: KB_SUBAGENT_PROMPT,
+        label: "Combined KB research + email",
+        systemPrompt: COMBINED_PROMPT,
         tool: kbSearchTool(ctx),
         query,
-        model: subagentModel,
+        model,
         ctx,
       }),
     ctx,
-    { difficulty, model: subagentModel },
-  ).then(
-    (value) => ({ status: "fulfilled" as const, value }),
-    (reason) => ({ status: "rejected" as const, reason }),
-  );
-
-  const kbFindings =
-    kbResult.status === "fulfilled" && kbResult.value.trim()
-      ? kbResult.value
-      : null;
-
-  if (kbResult.status === "rejected") {
-    log(
-      "warn",
-      "agent.subagent.kb.failed",
-      { error: serializeError(kbResult.reason) },
-      { ...ctx, component: "agent" },
-    );
-  }
-
-  if (!kbFindings) {
-    throw new Error("KB subagent failed or returned empty");
-  }
-
-  const text = await withSpan(
-    "agent.master",
-    () => synthesize({ query, kbFindings, ctx }),
-    ctx,
+    { difficulty, model },
   );
 
   log(
     "info",
     "agent.claude.response",
     {
-      mode: "multi_agent",
+      mode: "combined",
       difficulty,
-      subagentModel,
-      masterModel: MODEL_MASTER,
-      kbOk: !!kbFindings,
+      model,
       text: summarizeText(text),
     },
     { ...ctx, component: "agent" },
   );
 
-  return { text, stopReason: `claude_multi_agent:${difficulty}` };
+  return { text, stopReason: `claude_combined:${difficulty}` };
 }
 
 async function prepareResponseWithOpenAI(
@@ -323,19 +240,30 @@ async function prepareResponseWithOpenAI(
 ): Promise<PrepareResponseResult> {
   const kbResult = await withTimeout({
     label: "Nia KB search (OpenAI fallback)",
-    timeoutMs: 20_000,
-    run: async () =>
+    timeoutMs: TEN_MINUTES_MS,
+    run: (signal) =>
       searchSources({
         query,
         dataSources: [],
         ctx: { ...ctx, component: "agent.kb" },
+        signal,
       }),
   });
   const kbCtx = JSON.stringify(kbResult).slice(0, 60_000);
 
-  const system = `${MASTER_PROMPT}
+  const system = `You are a support agent writing an email response using only retrieved knowledge base context.
 
-You do NOT have access to tools in this mode. You are given retrieved KB context below; do not invent anything beyond it.`;
+Hard requirements (non-negotiable):
+- Do NOT invent methods, options, imports, or paths beyond what the retrieved KB context contains.
+  If the KB did not cover something, say so plainly.
+- Cite source paths/URLs exactly as they appear in the retrieved KB context, formatted as [kb/<path-or-url>].
+  1-4 citations total, only citing sources present in the retrieved context.
+- Structure the reply as:
+  - Direct answer: 2-4 sentences.
+  - Code example: one copy-pasteable block (if relevant).
+  - Short "Notes / gotchas" section if needed (bullets).
+
+Write a clean, self-contained answer — no meta-commentary.`;
 
   const user = [
     `USER_QUESTION:`,
@@ -347,7 +275,7 @@ You do NOT have access to tools in this mode. You are given retrieved KB context
 
   const res = await withTimeout({
     label: "OpenAI answer",
-    timeoutMs: 45_000,
+    timeoutMs: TEN_MINUTES_MS,
     run: (signal) =>
       openaiClient().chat.completions.create(
         {

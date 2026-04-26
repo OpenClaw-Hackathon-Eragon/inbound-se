@@ -271,6 +271,7 @@ export type SearchSourcesArgs = {
   repositories?: string[];
   dataSources?: string[];
   ctx?: LogCtx;
+  signal?: AbortSignal;
 };
 
 export async function searchSources(args: SearchSourcesArgs): Promise<NiaSearchResult> {
@@ -297,7 +298,7 @@ export async function searchSources(args: SearchSourcesArgs): Promise<NiaSearchR
     if (dataSources.length) body.data_sources = dataSources;
     const res = await niaFetch<NiaSearchResult>(
       "/search",
-      { method: "POST", body: JSON.stringify(body) },
+      { method: "POST", body: JSON.stringify(body), signal: args.signal },
       ctx,
     );
     log(

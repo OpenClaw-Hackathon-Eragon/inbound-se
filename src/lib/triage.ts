@@ -4,6 +4,7 @@ import { z } from "zod";
 import { withTimeout } from "./llmTimeout";
 import { log, serializeError, summarizeText, type LogCtx } from "./log";
 import { openaiClient } from "./openaiClient";
+import { TEN_MINUTES_MS } from "./timeouts";
 
 export const TriageResultSchema = z.union([
   z.object({
@@ -105,7 +106,7 @@ async function triageWithClaude(args: {
   const start = Date.now();
   const message = await withTimeout({
     label: "Claude triage",
-    timeoutMs: 20_000,
+    timeoutMs: TEN_MINUTES_MS,
     run: (signal) =>
       client().messages.create(
         {
@@ -158,7 +159,7 @@ async function triageWithOpenAI(args: {
   const start = Date.now();
   const res = await withTimeout({
     label: "OpenAI triage",
-    timeoutMs: 20_000,
+    timeoutMs: TEN_MINUTES_MS,
     run: (signal) =>
       openaiClient().chat.completions.create(
         {
