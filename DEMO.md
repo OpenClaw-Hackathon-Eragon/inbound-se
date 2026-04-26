@@ -60,11 +60,150 @@ dies. The video is your insurance.
 
 ---
 
-## Scenario 1 — Hero demo (the one you forward live)
+> Scenarios are ordered from simplest (single-concept lookup, classifies as
+> `easy`) to most complex (multi-part debugging, classifies as `complex` and
+> exercises the full Opus + parallel-synthesis path). Walk them in order on
+> stage if you have time; otherwise skip to Scenario 5 — that's the live
+> demo.
 
-**This is the scenario you forward on stage.** It's tuned to: route to Opus
-subagents, force both repo and docs to contribute, and produce a reply with
-visible citations from both sources.
+## Scenario 1 — Cost-routing proof point (easy classification)
+
+**Simplest case. Use this if a judge asks "how do you keep this affordable
+at scale?"**
+
+**Email body:**
+
+> What does `signInWithPassword` return on success? Just confirming before I
+> write the error-handling branch.
+
+**Expected behavior:**
+
+- Difficulty classifier → `easy` (single conceptual lookup, no debugging
+  context).
+- Both subagents run on **Sonnet 4.6**, not Opus.
+- Repo subagent dominates (this is a type-signature question), docs subagent
+  may legitimately have "Gaps".
+- Wall time: 8–15s.
+- `stopReason`: `claude_multi_agent:easy`.
+
+**Highlight on stage:**
+
+- "We classify each inbound on a Haiku call before routing — easy questions
+  go to Sonnet, complex to Opus. We don't waste a $15/Mtok model on a type
+  lookup."
+- Show the difference in `stopReason` between this scenario and Scenario 5
+  (Hero) — same pipeline, different model tier.
+
+**Backup:**
+
+```bash
+curl -sS -X POST "$BASE_URL/api/query" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"What does signInWithPassword return on success?"}' | jq -r '.stopReason, .text'
+```
+
+---
+
+## Scenario 2 — Graceful "I don't know" (the no-hallucinations proof)
+
+**Still classifies easy (single conceptual lookup), but the value is in the
+refusal mechanism, not the routing. Use this when a judge tries to break the
+agent — their first instinct is to ask something out of scope.**
+
+**Email body:**
+
+> Does supabase-js support PartiQL queries? We use that with DynamoDB and
+> wondered if there's a similar SQL-ish escape hatch.
+
+**Expected behavior:**
+
+- Difficulty classifier → `easy` (single conceptual ask).
+- Both subagents return Findings that don't cover PartiQL. Their `Gaps`
+  bullets surface this.
+- Master writes a reply that says clearly "this isn't covered in the
+  supabase-js repo or the JS reference docs," then pivots to what supabase-js
+  *does* support (e.g., raw SQL via `rpc()`, the query builder).
+- It does NOT invent a `partiql()` method.
+
+**Highlight on stage:**
+
+- "Watch — it knows what it doesn't know. The hard part of any agent product
+  is making it shut up when it should. We give the master a structured
+  `Gaps` block from each subagent so it can tell when the sources are silent."
+
+**If asked "how do you guarantee this?":** the subagent system prompts forbid
+inventing methods/options/imports, and require citing only paths that
+appeared in actual Nia results. The master prompt repeats the same
+constraint and treats unavailable findings as a signal to surface the gap,
+not to fill it from prior knowledge.
+
+---
+
+## Scenario 3 — The "pre-qualifying lead" angle (borderline easy)
+
+**Strategic angle from the build plan. Single-question body so the
+classifier likely picks `easy`, but the answer rewards multi-source
+synthesis.**
+
+**Email body:**
+
+> Hey — using `@supabase/supabase-js` 1.35 in production, considering an
+> upgrade. Any breaking changes I should know about?
+
+**Expected behavior:**
+
+- Difficulty classifier → likely `easy` (one conceptual ask, no error
+  context). If it routes to `complex`, that's also fine — the classifier
+  defaults toward complex on ambiguity.
+- Docs subagent surfaces upgrade/migration guidance; repo subagent surfaces
+  the current API surface.
+- Master contrasts the two when the user mentions a stale version.
+
+**Highlight on stage:**
+
+- *"It didn't just answer the question — it noticed they're on an outdated
+  version and proactively pulled the migration path."* That's the "Living
+  Technical Oracle" line from the build plan.
+
+---
+
+## Scenario 4 — Multi-source synthesis (complex debugging)
+
+**Now we're in `complex` territory. Showcases the parallel subagent flow on
+a question that genuinely needs both sources.**
+
+**Email body:**
+
+> Realtime `postgres_changes` subscription drops silently after ~5 min on
+> Vercel. No errors thrown. Is there a heartbeat / keep-alive config, or is
+> this a serverless-runtime thing?
+
+**Expected behavior:**
+
+- Difficulty → `complex` (debugging across runtime + framework behavior).
+- Repo subagent (Opus) finds the realtime client config and any timeout
+  constants (cite `[supabase-js/src/...]`).
+- Docs subagent (Opus) finds the deployment guidance and recommended client
+  config (cite `[supabase-docs/...]`).
+- Master reconciles both — typical answer mentions both the client option
+  AND the runtime constraint.
+- `stopReason`: `claude_multi_agent:complex`.
+
+**Highlight on stage:**
+
+- Show citations from BOTH `[supabase-js/...]` and `[supabase-docs/...]` in
+  the same reply.
+- "The repo tells us what knob exists. The docs tell us how to deploy it.
+  Neither source alone gives the right answer — that's why we run them in
+  parallel and let a synthesizer reconcile."
+
+---
+
+## Scenario 5 — Hero demo (the one you forward live)
+
+**Most complex. This is the scenario you forward on stage.** It's tuned to:
+route to Opus subagents, force both repo and docs to contribute, and produce
+a reply with visible citations from both sources.
 
 **Forward this email:**
 
@@ -122,137 +261,13 @@ JSON
 
 ---
 
-## Scenario 2 — Cost-routing proof point (easy classification)
-
-**Use this if a judge asks "how do you keep this affordable at scale?"**
-
-**Email body:**
-
-> What does `signInWithPassword` return on success? Just confirming before I
-> write the error-handling branch.
-
-**Expected behavior:**
-
-- Difficulty classifier → `easy` (single conceptual lookup, no debugging
-  context).
-- Both subagents run on **Sonnet 4.6**, not Opus.
-- Repo subagent dominates (this is a type-signature question), docs subagent
-  may legitimately have "Gaps".
-- Wall time: 8–15s.
-- `stopReason`: `claude_multi_agent:easy`.
-
-**Highlight on stage:**
-
-- "We classify each inbound on a Haiku call before routing — easy questions
-  go to Sonnet, complex to Opus. We don't waste a $15/Mtok model on a type
-  lookup."
-- Show the difference in `stopReason` between Scenarios 1 and 2.
-
-**Backup:**
-
-```bash
-curl -sS -X POST "$BASE_URL/api/query" \
-  -H "Content-Type: application/json" \
-  -d '{"query":"What does signInWithPassword return on success?"}' | jq -r '.stopReason, .text'
-```
-
----
-
-## Scenario 3 — Multi-source synthesis (debugging)
-
-**Showcases the parallel subagent flow on a question that genuinely needs
-both sources.**
-
-**Email body:**
-
-> Realtime `postgres_changes` subscription drops silently after ~5 min on
-> Vercel. No errors thrown. Is there a heartbeat / keep-alive config, or is
-> this a serverless-runtime thing?
-
-**Expected behavior:**
-
-- Difficulty → `complex`.
-- Repo subagent finds the realtime client config and any timeout constants
-  (cite `[supabase-js/src/...]`).
-- Docs subagent finds the deployment guidance and recommended client config
-  (cite `[supabase-docs/...]`).
-- Master reconciles both — typical answer mentions both the client option
-  AND the runtime constraint.
-- `stopReason`: `claude_multi_agent:complex`.
-
-**Highlight on stage:**
-
-- Show citations from BOTH `[supabase-js/...]` and `[supabase-docs/...]` in
-  the same reply.
-- "The repo tells us what knob exists. The docs tell us how to deploy it.
-  Neither source alone gives the right answer — that's why we run them in
-  parallel and let a synthesizer reconcile."
-
----
-
-## Scenario 4 — Graceful "I don't know" (the no-hallucinations proof)
-
-**Use this when a judge tries to break the agent.** Their first instinct
-will be to ask something out of scope.
-
-**Email body:**
-
-> Does supabase-js support PartiQL queries? We use that with DynamoDB and
-> wondered if there's a similar SQL-ish escape hatch.
-
-**Expected behavior:**
-
-- Both subagents return Findings that don't cover PartiQL. Their `Gaps`
-  bullets surface this.
-- Master writes a reply that says clearly "this isn't covered in the
-  supabase-js repo or the JS reference docs," then pivots to what supabase-js
-  *does* support (e.g., raw SQL via `rpc()`, the query builder).
-- It does NOT invent a `partiql()` method.
-
-**Highlight on stage:**
-
-- "Watch — it knows what it doesn't know. The hard part of any agent product
-  is making it shut up when it should. We give the master a structured
-  `Gaps` block from each subagent so it can tell when the sources are silent."
-
-**If asked "how do you guarantee this?":** the subagent system prompts forbid
-inventing methods/options/imports, and require citing only paths that
-appeared in actual Nia results. The master prompt repeats the same
-constraint and treats unavailable findings as a signal to surface the gap,
-not to fill it from prior knowledge.
-
----
-
-## Scenario 5 — The "pre-qualifying lead" angle (optional, only if time)
-
-**Strategic angle from the build plan.** Use this if you have time in Q&A.
-
-**Email body:**
-
-> Hey — using `@supabase/supabase-js` 1.35 in production, considering an
-> upgrade. Any breaking changes I should know about?
-
-**What to point out:**
-
-The agent should note that 1.x is well behind current major (2.x at time of
-writing) and surface migration guidance from the docs. Frame it as: *"It
-didn't just answer the question — it noticed they're on an outdated version
-and proactively pulled the migration path."* That's the "Living Technical
-Oracle" line from the build plan.
-
-This works because the docs source includes upgrade/migration pages, and
-the repo source has the current API surface. The synthesizer naturally
-contrasts the two when the user mentions a stale version.
-
----
-
 ## 3-minute demo flow (timing reference)
 
 | Time | Beat | What you say / show |
 |---|---|---|
 | 0:00–0:20 | The pain | "Every founder in this room is their company's SE. You're answering the same prospect questions at midnight." |
 | 0:20–0:40 | The setup | "We forward inbound to one address. The agent searches our repo AND our docs in parallel, then writes a grounded reply. Watch." |
-| 0:40–2:00 | **Live demo (Scenario 1)** | Forward → narrate the wait (~30s) → reply lands → open it → scroll to code block → point at citations → open one cited file in the actual repo. |
+| 0:40–2:00 | **Live demo (Scenario 5)** | Forward → narrate the wait (~30s) → reply lands → open it → scroll to code block → point at citations → open one cited file in the actual repo. |
 | 2:00–2:30 | Architecture / cost story | One slide. Nia (2 indexed sources, both load-bearing) + AgentMail (inbox, threading, webhooks) + the model-tier routing (Haiku classify → Sonnet/Opus subagents → Haiku synthesize). |
 | 2:30–2:50 | The differentiator | "It cites every claim. It knows what it doesn't know. And it routes by complexity so it's not burning Opus on `getUser()` lookups." |
 | 2:50–3:00 | The ask | "We'd ship this Monday. Who wants the beta?" |
@@ -322,7 +337,7 @@ stream incremental tokens.
 | Wifi dies entirely | Play the recorded video from the pre-demo checklist. |
 | Nia is slow / 5xx | The pipeline degrades to whichever subagent succeeded. The OpenAI fallback also runs both Nia retrievals in parallel and is independent of the Anthropic path. |
 | Both Anthropic + Nia down | Static "busy" reply still ships from `BUSY_FALLBACK_TEXT`. Not a demo win, but not a crash. Mention the fallback chain in the architecture slide regardless — judges grade on resilience. |
-| Reply quality is mid on the live forward | Have Scenario 3 queued as the next forward. "Let me show you the harder one." |
+| Reply quality is mid on the live forward | Have Scenario 4 queued as the next forward. "Let me show you the harder one." |
 
 The cardinal rule: **never debug on stage.** If something breaks, cut to the
 backup video, finish the architecture slide, take questions. You can
