@@ -2,24 +2,20 @@
 
 This repo is a minimal Next.js app deployed on Vercel and used as the webhook receiver for AgentMail.
 
-It implements an **email-based support agent for `supabase-js`**:
+It implements an **email-based support agent grounded in a Nia-indexed knowledge base**:
 
 - Inbound email → LLM triage
 - If underspecified → 1 clarifying email (hard cap)
-- If ready → grounded answer with code + citations, via parallel Nia retrievals over the `supabase/supabase-js` repo **and** the Supabase JS reference docs, compiled by a master agent
+- If ready → grounded answer with code + citations, via Nia retrievals over your indexed knowledge base sources, compiled by a master agent
 
 ## Agent pipeline
 
-Each ready-to-answer query flows through 4 stages. Models are picked per-stage to trade cost for quality, and a fast Haiku classifier decides which tier the two research subagents run on.
+Each ready-to-answer query flows through 4 stages. Models are picked per-stage to trade cost for quality, and a fast Haiku classifier decides which tier the research subagent runs on.
 
 1. **Difficulty classifier** — Haiku reads the user question and emits a single token: `easy` or `complex`. Short conceptual questions ("how do I sign in?") classify as easy; questions plus stack traces, multi-part debugging, or framework-specific edge cases classify as complex. Defaults to `complex` on any classifier failure so quality wins when in doubt.
-2. **Two research subagents — run in parallel.** Each is scoped to exactly one Nia source and exposes one tool:
-   - **Repo subagent** → searches the indexed `supabase/supabase-js` GitHub repository (code, types, examples).
-   - **Docs subagent** → searches the indexed Supabase JS reference docs (root: `https://supabase.com/docs/reference/javascript/start`).
-   - Both subagents run on the same model, chosen by the classifier (Sonnet for `easy`, Opus for `complex`). Each issues 1–3 focused Nia searches and returns structured `Findings / Code / Gaps` text — **not** a final email.
-   - Subagents run concurrently with `Promise.allSettled` and an independent 35s timeout each, so one slow or failed source doesn't block the other.
-3. **Master synthesizer** — Haiku. Receives the original question plus both subagents' `Findings` blocks and compiles the email reply. No tools, no extended thinking — the work is mechanical reconciliation and formatting (prefer docs for usage, prefer repo for type signatures, mix citations from both).
-4. **Fallbacks.** If the Claude pipeline fails or both subagents return empty, drop to an OpenAI call seeded with parallel Nia retrievals from both sources. If that also fails, return a static "busy" message.
+2. **Research subagent.** A single subagent queries the knowledge base via Nia search and returns structured `Findings / Code / Gaps` text — **not** a final email.
+3. **Master synthesizer** — Haiku. Receives the original question plus the subagent’s findings and compiles the email reply. No tools, no extended thinking — the work is mechanical reconciliation and formatting.
+4. **Fallbacks.** If the Claude pipeline fails or returns empty, drop to an OpenAI call seeded with Nia retrievals. If that also fails, return a static "busy" message.
 
 ### Model choices
 
@@ -33,9 +29,9 @@ Each ready-to-answer query flows through 4 stages. Models are picked per-stage t
 
 The response's `stopReason` encodes the path taken: `claude_multi_agent:easy`, `claude_multi_agent:complex`, `openai_fallback`, or `busy_fallback`. Grep production logs on these to validate classifier calls and tail latency.
 
-### One-time setup: index the docs source in Nia
+### One-time setup: index your knowledge base sources in Nia
 
-The repo source is indexed automatically the first time it's queried, but the docs source needs to be created once via `indexDocumentation` (in `src/lib/nia.ts`). Run it from a Node REPL or a one-off script with `NIA_API_KEY` set:
+This workflow only queries Nia `data_sources`. Make sure your knowledge base sources are indexed in Nia (documentation roots, internal KB pages, etc.). You can create a documentation source once via `indexDocumentation` (in `src/lib/nia.ts`). Run it from a Node REPL or a one-off script with `NIA_API_KEY` set:
 
 ```ts
 import { indexDocumentation } from "@/lib/nia";
@@ -47,7 +43,7 @@ await indexDocumentation("https://supabase.com/docs/reference/javascript/start",
 });
 ```
 
-Indexing takes a few minutes. Poll `getSource(id)` until `status` reaches `completed` / `indexed` before the docs subagent will return useful results.
+Indexing takes a few minutes. Poll `getSource(id)` until `status` reaches `completed` / `indexed` before queries return useful results.
 
 ## Endpoints (after deploy)
 
@@ -71,7 +67,7 @@ Query endpoint quick test (requires `ANTHROPIC_API_KEY` + `NIA_API_KEY`):
 ```bash
 curl -sS -X POST "http://localhost:3000/api/query" \
   -H "Content-Type: application/json" \
-  -d '{"query":"How do I sign in with email+password in supabase-js?"}'
+  -d '{"query":"How do I do X in the supported library?"}'
 ```
 
 ## Vercel setup
@@ -93,7 +89,7 @@ curl -sS -X POST "http://localhost:3000/api/query" \
   - First email returns **clarifying questions** when vague.
   - Second email returns a **grounded answer** with:
     - a copy/paste code block
-    - at least one file citation like `[supabase-js/path/to/file.ts]`
+    - at least one citation like `[kb/<path-or-url>]`
 
 ## 90-second demo script (rehearsal)
 
@@ -106,3 +102,5 @@ curl -sS -X POST "http://localhost:3000/api/query" \
 
 - `.env.example` documents required env vars. Do not commit real secrets.
 - This runs on Vercel, so thread state is stored “in-band” in the email thread (a small encoded marker), not in server memory.
+
+There is **no GitHub repo dependency** — all grounding comes from Nia.

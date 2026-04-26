@@ -277,9 +277,6 @@ export async function searchSources(args: SearchSourcesArgs): Promise<NiaSearchR
   const ctx = args.ctx ?? {};
   const repositories = args.repositories ?? [];
   const dataSources = args.dataSources ?? [];
-  if (!repositories.length && !dataSources.length) {
-    throw new Error("searchSources requires at least one repository or data source");
-  }
   log(
     "info",
     "nia.search.start",

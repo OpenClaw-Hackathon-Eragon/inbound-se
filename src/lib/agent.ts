@@ -7,9 +7,6 @@ import { withTimeout } from "./llmTimeout";
 import { log, serializeError, summarizeText, withSpan, type LogCtx } from "./log";
 import { openaiClient } from "./openaiClient";
 
-const SUPABASE_JS_REPO = "supabase/supabase-js";
-const SUPABASE_DOCS_URL = "https://supabase.com/docs/reference/javascript/start";
-
 const MODEL_SUBAGENT_EASY = "claude-sonnet-4-6";
 const MODEL_SUBAGENT_HARD = "claude-opus-4-7";
 const MODEL_MASTER = "claude-haiku-4-5-20251001";
@@ -17,7 +14,7 @@ const MODEL_CLASSIFIER = "claude-haiku-4-5-20251001";
 
 type Difficulty = "easy" | "complex";
 
-const CLASSIFIER_PROMPT = `You triage incoming developer-support questions for a supabase-js support agent.
+const CLASSIFIER_PROMPT = `You triage incoming developer-support questions for a developer support agent.
 Pick which model tier should answer.
 
 Output exactly one lowercase word: easy OR complex. No punctuation, no explanation.
@@ -34,64 +31,34 @@ COMPLEX — needs the strongest model:
 
 When unsure, choose complex.`;
 
-const REPO_SUBAGENT_PROMPT = `You are a research subagent. Your only job is to surface relevant facts
-from the indexed ${SUPABASE_JS_REPO} GitHub repository (source code, types, examples).
+const KB_SUBAGENT_PROMPT = `You are a research subagent. Your only job is to surface relevant facts
+from the indexed knowledge base in Nia.
 
-You have one tool, nia_search_repo. Use it.
+You have one tool, nia_search_kb. Use it.
 
 How to work:
 - Run 1-3 focused queries. Issue follow-ups if the first results are thin.
 - Pull out concrete API names, type signatures, options, file paths, and short snippets.
-- Cite file paths exactly as they appear in Nia's results, formatted as
-  [supabase-js/path/to/file.ts]. Only cite paths you actually retrieved.
-- Do NOT invent anything. If something isn't in the results, say so.
-
-Output format (plain text, no preamble, no email niceties):
-- "Findings:" then 3-8 bullets of factual takeaways, each with a citation.
-- "Code:" then one short copy-pasteable snippet if relevant.
-- "Gaps:" 0-2 bullets describing what the repo did NOT cover for this question.
-
-You are not writing the final reply. A separate agent will compile findings from
-you and a docs subagent into a single response.`;
-
-const DOCS_SUBAGENT_PROMPT = `You are a research subagent. Your only job is to surface relevant guidance
-from the indexed Supabase JS reference documentation (root: ${SUPABASE_DOCS_URL}).
-
-You have one tool, nia_search_docs. Use it.
-
-How to work:
-- Run 1-3 focused queries. Issue follow-ups if the first results are thin.
-- Pull out concrete how-to guidance, recommended patterns, configuration knobs,
-  and short example snippets.
 - Cite source paths/URLs exactly as Nia returns them, formatted as
-  [supabase-docs/<path-or-url>]. Only cite paths you actually retrieved.
+  [kb/<path-or-url>]. Only cite paths you actually retrieved.
 - Do NOT invent anything. If something isn't in the results, say so.
 
 Output format (plain text, no preamble, no email niceties):
-- "Findings:" then 3-8 bullets of factual takeaways, each with a citation.
-- "Code:" then one short copy-pasteable snippet if the docs provide one.
-- "Gaps:" 0-2 bullets describing what the docs did NOT cover for this question.
+- "Findings:" then 4-10 bullets of factual takeaways, each with a citation.
+- "Code:" then one short copy-pasteable snippet if relevant.
+- "Gaps:" 0-2 bullets describing what the KB did NOT cover for this question.
 
-You are not writing the final reply. A separate agent will compile findings from
-you and a repo subagent into a single response.`;
+You are not writing the final reply. A separate agent will turn your findings into
+a single email response.`;
 
-const MASTER_PROMPT = `You are a support agent for the supabase-js JavaScript client library.
-Two research subagents have already searched authoritative sources for you:
-
-1. REPO_FINDINGS: from the ${SUPABASE_JS_REPO} GitHub repository.
-2. DOCS_FINDINGS: from the official Supabase JS reference docs.
-
-Compile a single email reply that draws on BOTH sources:
-- Prefer DOCS for "how to use this in practice" guidance.
-- Prefer REPO for exact exports, type signatures, and edge-case behavior.
-- If they conflict, trust the repo (source of truth) and note the discrepancy briefly.
-- If one of the findings sets is marked unavailable, work from whatever you have.
+const MASTER_PROMPT = `You are a support agent.
+An upstream research subagent has already searched authoritative KB sources for you.
+You will be given its findings.
 
 Hard requirements (non-negotiable):
 - Do NOT invent methods, options, imports, or paths beyond what the subagents reported.
   If neither source covers something, say so plainly.
-- Cite paths/URLs exactly as the subagents listed them. Mix citations from both
-  sources where it strengthens the answer. 1-4 citations total.
+- Cite paths/URLs exactly as the subagent listed them. 1-4 citations total.
 - Reply as an email:
   - Direct answer: 2-4 sentences.
   - Code example: one copy-pasteable block.
@@ -115,41 +82,25 @@ function extractText(message: Anthropic.Beta.BetaMessage): string {
     .trim();
 }
 
-const repoSearchTool = (ctx: LogCtx) =>
+const kbSearchTool = (ctx: LogCtx) =>
   betaZodTool({
-    name: "nia_search_repo",
-    description: `Search the indexed ${SUPABASE_JS_REPO} GitHub repository for code, types, and examples relevant to a natural-language query. Returns Nia's raw search response as JSON.`,
+    name: "nia_search_kb",
+    description: `Search the indexed knowledge base in Nia. Returns Nia's raw search response as JSON.`,
     inputSchema: z.object({
       query: z
         .string()
         .min(1)
-        .describe("Natural-language question or keywords to search the indexed repo for."),
+        .describe("Natural-language question or keywords to search the knowledge base for."),
     }),
     run: async ({ query }) => {
       const result = await searchSources({
         query,
-        repositories: [SUPABASE_JS_REPO],
-        ctx: { ...ctx, component: "agent.repo" },
-      });
-      return JSON.stringify(result);
-    },
-  });
-
-const docsSearchTool = (ctx: LogCtx) =>
-  betaZodTool({
-    name: "nia_search_docs",
-    description: `Search the indexed Supabase JS reference docs (${SUPABASE_DOCS_URL}) for guidance and examples relevant to a natural-language query. Returns Nia's raw search response as JSON.`,
-    inputSchema: z.object({
-      query: z
-        .string()
-        .min(1)
-        .describe("Natural-language question or keywords to search the indexed docs for."),
-    }),
-    run: async ({ query }) => {
-      const result = await searchSources({
-        query,
-        dataSources: [SUPABASE_DOCS_URL],
-        ctx: { ...ctx, component: "agent.docs" },
+        // No per-repo config: this assumes the user's Nia account is already
+        // set up so that searching without explicit scoping hits the intended KB.
+        // If this isn't true, `searchSources` should be extended to support a
+        // single configured KB scope from Nia itself (not from this app).
+        dataSources: [],
+        ctx: { ...ctx, component: "agent.kb" },
       });
       return JSON.stringify(result);
     },
@@ -199,7 +150,7 @@ async function classifyDifficulty(query: string, ctx: LogCtx): Promise<Difficult
 async function runSubagent(args: {
   label: string;
   systemPrompt: string;
-  tool: ReturnType<typeof repoSearchTool>;
+  tool: ReturnType<typeof kbSearchTool>;
   query: string;
   model: string;
   ctx: LogCtx;
@@ -240,19 +191,15 @@ async function runSubagent(args: {
 
 async function synthesize(args: {
   query: string;
-  repoFindings: string | null;
-  docsFindings: string | null;
+  kbFindings: string | null;
   ctx: LogCtx;
 }): Promise<string> {
   const userMessage = [
     `USER_QUESTION:`,
     args.query,
     ``,
-    `REPO_SUBAGENT_FINDINGS:`,
-    args.repoFindings ?? "(unavailable — repo subagent failed or returned nothing)",
-    ``,
-    `DOCS_SUBAGENT_FINDINGS:`,
-    args.docsFindings ?? "(unavailable — docs subagent failed or returned nothing)",
+    `KB_SUBAGENT_FINDINGS:`,
+    args.kbFindings ?? "(unavailable — kb subagent failed or returned nothing)",
   ].join("\n");
 
   const res = await withTimeout({
@@ -297,7 +244,7 @@ Please try again in a few minutes. If it’s urgent, feel free to reply with:
 - the exact error message
 - what you’ve tried so far
 
-— Inbound (supabase-js support)`;
+— Inbound (support)`;
 
 async function prepareResponseWithClaude(
   query: string,
@@ -311,70 +258,45 @@ async function prepareResponseWithClaude(
   const subagentModel =
     difficulty === "easy" ? MODEL_SUBAGENT_EASY : MODEL_SUBAGENT_HARD;
 
-  const [repoResult, docsResult] = await Promise.allSettled([
-    withSpan(
-      "agent.subagent.repo",
-      () =>
-        runSubagent({
-          label: "Repo subagent",
-          systemPrompt: REPO_SUBAGENT_PROMPT,
-          tool: repoSearchTool(ctx),
-          query,
-          model: subagentModel,
-          ctx,
-        }),
-      ctx,
-      { difficulty, model: subagentModel },
-    ),
-    withSpan(
-      "agent.subagent.docs",
-      () =>
-        runSubagent({
-          label: "Docs subagent",
-          systemPrompt: DOCS_SUBAGENT_PROMPT,
-          tool: docsSearchTool(ctx),
-          query,
-          model: subagentModel,
-          ctx,
-        }),
-      ctx,
-      { difficulty, model: subagentModel },
-    ),
-  ]);
+  const kbResult = await withSpan(
+    "agent.subagent.kb",
+    () =>
+      runSubagent({
+        label: "KB subagent",
+        systemPrompt: KB_SUBAGENT_PROMPT,
+        tool: kbSearchTool(ctx),
+        query,
+        model: subagentModel,
+        ctx,
+      }),
+    ctx,
+    { difficulty, model: subagentModel },
+  ).then(
+    (value) => ({ status: "fulfilled" as const, value }),
+    (reason) => ({ status: "rejected" as const, reason }),
+  );
 
-  const repoFindings =
-    repoResult.status === "fulfilled" && repoResult.value.trim()
-      ? repoResult.value
-      : null;
-  const docsFindings =
-    docsResult.status === "fulfilled" && docsResult.value.trim()
-      ? docsResult.value
+  const kbFindings =
+    kbResult.status === "fulfilled" && kbResult.value.trim()
+      ? kbResult.value
       : null;
 
-  if (repoResult.status === "rejected") {
+  if (kbResult.status === "rejected") {
     log(
       "warn",
-      "agent.subagent.repo.failed",
-      { error: serializeError(repoResult.reason) },
-      { ...ctx, component: "agent" },
-    );
-  }
-  if (docsResult.status === "rejected") {
-    log(
-      "warn",
-      "agent.subagent.docs.failed",
-      { error: serializeError(docsResult.reason) },
+      "agent.subagent.kb.failed",
+      { error: serializeError(kbResult.reason) },
       { ...ctx, component: "agent" },
     );
   }
 
-  if (!repoFindings && !docsFindings) {
-    throw new Error("Both subagents failed or returned empty");
+  if (!kbFindings) {
+    throw new Error("KB subagent failed or returned empty");
   }
 
   const text = await withSpan(
     "agent.master",
-    () => synthesize({ query, repoFindings, docsFindings, ctx }),
+    () => synthesize({ query, kbFindings, ctx }),
     ctx,
   );
 
@@ -386,8 +308,7 @@ async function prepareResponseWithClaude(
       difficulty,
       subagentModel,
       masterModel: MODEL_MASTER,
-      repoOk: !!repoFindings,
-      docsOk: !!docsFindings,
+      kbOk: !!kbFindings,
       text: summarizeText(text),
     },
     { ...ctx, component: "agent" },
@@ -400,55 +321,28 @@ async function prepareResponseWithOpenAI(
   query: string,
   ctx: LogCtx,
 ): Promise<PrepareResponseResult> {
-  const [repoResult, docsResult] = await Promise.allSettled([
-    withTimeout({
-      label: "Nia repo search (OpenAI fallback)",
-      timeoutMs: 20_000,
-      run: async () =>
-        searchSources({
-          query,
-          repositories: [SUPABASE_JS_REPO],
-          ctx: { ...ctx, component: "agent.repo" },
-        }),
-    }),
-    withTimeout({
-      label: "Nia docs search (OpenAI fallback)",
-      timeoutMs: 20_000,
-      run: async () =>
-        searchSources({
-          query,
-          dataSources: [SUPABASE_DOCS_URL],
-          ctx: { ...ctx, component: "agent.docs" },
-        }),
-    }),
-  ]);
-
-  const repoCtx =
-    repoResult.status === "fulfilled"
-      ? JSON.stringify(repoResult.value).slice(0, 30_000)
-      : "(unavailable)";
-  const docsCtx =
-    docsResult.status === "fulfilled"
-      ? JSON.stringify(docsResult.value).slice(0, 30_000)
-      : "(unavailable)";
-
-  if (repoResult.status === "rejected" && docsResult.status === "rejected") {
-    throw new Error("Both Nia searches failed in OpenAI fallback");
-  }
+  const kbResult = await withTimeout({
+    label: "Nia KB search (OpenAI fallback)",
+    timeoutMs: 20_000,
+    run: async () =>
+      searchSources({
+        query,
+        dataSources: [],
+        ctx: { ...ctx, component: "agent.kb" },
+      }),
+  });
+  const kbCtx = JSON.stringify(kbResult).slice(0, 60_000);
 
   const system = `${MASTER_PROMPT}
 
-You do NOT have access to tools in this mode. You are given retrieved repo and docs context below; do not invent anything beyond it.`;
+You do NOT have access to tools in this mode. You are given retrieved KB context below; do not invent anything beyond it.`;
 
   const user = [
     `USER_QUESTION:`,
     query,
     ``,
-    `RETRIEVED_REPO_CONTEXT_JSON:`,
-    repoCtx,
-    ``,
-    `RETRIEVED_DOCS_CONTEXT_JSON:`,
-    docsCtx,
+    `RETRIEVED_KB_CONTEXT_JSON:`,
+    kbCtx,
   ].join("\n");
 
   const res = await withTimeout({
@@ -475,8 +369,7 @@ You do NOT have access to tools in this mode. You are given retrieved repo and d
       model: res.model ?? "gpt-5.5-medium",
       responseId: (res as unknown as { id?: unknown }).id ?? undefined,
       finishReason: res.choices?.[0]?.finish_reason ?? null,
-      repoOk: repoResult.status === "fulfilled",
-      docsOk: docsResult.status === "fulfilled",
+      kbOk: true,
       text: summarizeText(text),
       usage: (res as unknown as { usage?: unknown }).usage ?? undefined,
     },

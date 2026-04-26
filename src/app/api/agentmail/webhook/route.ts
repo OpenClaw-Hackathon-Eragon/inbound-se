@@ -53,13 +53,13 @@ function buildClarifyingEmail(args: {
   state: ThreadState;
 }): string {
   const lines = [
-    `Happy to help — a few quick questions so I can give you a grounded supabase-js answer:`,
+    `Happy to help — a few quick questions so I can give you a grounded answer:`,
     ``,
     ...args.questions.slice(0, 3).map((q, i) => `${i + 1}. ${q}`),
     ``,
-    `Reply here with the answers and I’ll follow up with code and file citations from the supabase-js repo.`,
+    `Reply here with the answers and I’ll follow up with code and citations from our knowledge base.`,
     ``,
-    `— Inbound (supabase-js support)`,
+    `— Inbound (support)`,
   ];
   return appendThreadStateMarker(lines.join("\n"), args.state);
 }
