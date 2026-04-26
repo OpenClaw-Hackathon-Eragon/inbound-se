@@ -271,15 +271,13 @@ export type SearchSourcesArgs = {
   repositories?: string[];
   dataSources?: string[];
   ctx?: LogCtx;
+  signal?: AbortSignal;
 };
 
 export async function searchSources(args: SearchSourcesArgs): Promise<NiaSearchResult> {
   const ctx = args.ctx ?? {};
   const repositories = args.repositories ?? [];
   const dataSources = args.dataSources ?? [];
-  if (!repositories.length && !dataSources.length) {
-    throw new Error("searchSources requires at least one repository or data source");
-  }
   log(
     "info",
     "nia.search.start",
@@ -300,7 +298,7 @@ export async function searchSources(args: SearchSourcesArgs): Promise<NiaSearchR
     if (dataSources.length) body.data_sources = dataSources;
     const res = await niaFetch<NiaSearchResult>(
       "/search",
-      { method: "POST", body: JSON.stringify(body) },
+      { method: "POST", body: JSON.stringify(body), signal: args.signal },
       ctx,
     );
     log(

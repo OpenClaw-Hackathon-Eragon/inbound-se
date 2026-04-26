@@ -4,6 +4,7 @@ import { z } from "zod";
 import { withTimeout } from "./llmTimeout";
 import { log, serializeError, summarizeText, type LogCtx } from "./log";
 import { openaiClient } from "./openaiClient";
+import { TEN_MINUTES_MS } from "./timeouts";
 
 export const TriageResultSchema = z.union([
   z.object({
@@ -34,7 +35,7 @@ function client(): Anthropic {
   return new Anthropic();
 }
 
-const SYSTEM_PROMPT = `You are the triage layer for a developer support agent that answers questions about supabase-js.
+const SYSTEM_PROMPT = `You are the triage layer for a developer support agent.
 
 Your job: read the email thread and decide if there is enough specific information to answer with a grounded, code-citation-based reply.
 
@@ -81,7 +82,7 @@ function busyTriageFallback(forceReady: boolean, thread: string): TriageResult {
     return {
       status: "READY",
       query: {
-        question: "Help with a supabase-js integration issue (details in thread).",
+        question: "Help with an integration issue (details in thread).",
         context: thread.slice(0, 5000),
       },
     };
@@ -90,7 +91,7 @@ function busyTriageFallback(forceReady: boolean, thread: string): TriageResult {
     status: "NEED_INFO",
     questions: [
       "Which framework/environment are you using (Next.js App Router, React SPA, Node script, React Native, etc.)?",
-      "Which supabase-js feature area is this (auth, database queries, realtime, storage)?",
+      "Which feature area is this (auth, database queries, realtime, storage, etc.)?",
       "What exactly is failing (error message or observed behavior) and what have you tried so far?",
     ],
   };
@@ -105,7 +106,7 @@ async function triageWithClaude(args: {
   const start = Date.now();
   const message = await withTimeout({
     label: "Claude triage",
-    timeoutMs: 20_000,
+    timeoutMs: TEN_MINUTES_MS,
     run: (signal) =>
       client().messages.create(
         {
@@ -158,7 +159,7 @@ async function triageWithOpenAI(args: {
   const start = Date.now();
   const res = await withTimeout({
     label: "OpenAI triage",
-    timeoutMs: 20_000,
+    timeoutMs: TEN_MINUTES_MS,
     run: (signal) =>
       openaiClient().chat.completions.create(
         {
